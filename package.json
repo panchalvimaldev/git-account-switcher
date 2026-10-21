@@ -4,9 +4,24 @@
   "description": "Pick which Git account to use for clone, pull and push over SSH or HTTPS, right from VS Code.",
   "version": "0.1.1",
   "publisher": "local",
+  "preview": true,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/panchalvimaldev/git-account-switcher.git"
+  },
+  "homepage": "https://github.com/panchalvimaldev/git-account-switcher#readme",
+  "bugs": {
+    "url": "https://github.com/panchalvimaldev/git-account-switcher/issues"
+  },
+  "keywords": ["git", "account", "ssh", "https", "credentials", "github", "gitlab", "bitbucket"],
   "engines": { "vscode": "^1.85.0" },
   "categories": ["SCM Providers", "Other"],
+  "capabilities": {
+    "untrustedWorkspaces": { "supported": false },
+    "virtualWorkspaces": { "supported": false }
+  },
+  "extensionKind": ["workspace"],
   "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
   "contributes": {
@@ -58,9 +73,11 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
+    "test": "npm run compile && node --test out/git-utils.test.js",
+    "check": "npm test && vsce ls",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile",
-    "package": "vsce package --allow-missing-repository"
+    "package": "vsce package"
   },
   "devDependencies": {
     "@types/node": "^18.19.0",

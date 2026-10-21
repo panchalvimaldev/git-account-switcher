@@ -2,6 +2,12 @@ import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
 import { execFile } from 'child_process';
+import {
+  formatCommandArgs,
+  httpsCredentialContext,
+  redactSensitiveText,
+  remoteTransport
+} from './git-utils';
 
 interface Account {
   label: string;
@@ -23,7 +29,7 @@ function git(
   env?: NodeJS.ProcessEnv
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    out.appendLine(`> git ${args.join(' ')}${cwd ? `   (cwd: ${cwd})` : ''}`);
+    out.appendLine(`> git ${formatCommandArgs(args)}${cwd ? `   (cwd: ${cwd})` : ''}`);
     execFile(
       'git',
       args,
@@ -34,10 +40,10 @@ function git(
         maxBuffer: 20 * 1024 * 1024
       },
       (err, stdout, stderr) => {
-        if (stdout) { out.appendLine(stdout.trim()); }
-        if (stderr) { out.appendLine(stderr.trim()); }
+        if (stdout) { out.appendLine(redactSensitiveText(stdout.trim())); }
+        if (stderr) { out.appendLine(redactSensitiveText(stderr.trim())); }
         if (err) {
-          reject(new Error((stderr || err.message).trim()));
+          reject(new Error(redactSensitiveText((stderr || err.message).trim())));
         } else {
           resolve({ stdout, stderr });
         }
@@ -103,31 +109,72 @@ function sshCommandFor(acc: Account): string {
   return `ssh -i '${key}' -o IdentitiesOnly=yes`;
 }
 
-function httpsCredentialContext(remoteUrl: string): string | undefined {
+async function getRemoteNames(cwd: string): Promise<string[]> {
   try {
-    const url = new URL(remoteUrl);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') { return undefined; }
-    return `${url.protocol}//${url.host}`;
+    const remotes = await git(['remote'], cwd);
+    return remotes.stdout.split(/\r?\n/).map(v => v.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+async function getConfig(cwd: string, key: string): Promise<string | undefined> {
+  try {
+    const r = await git(['config', '--get', key], cwd);
+    return r.stdout.trim() || undefined;
   } catch {
     return undefined;
   }
 }
 
-async function getRemoteUrls(cwd: string): Promise<string[]> {
+async function getRemoteUrl(
+  cwd: string,
+  name: string,
+  kind: 'push' | 'pull'
+): Promise<string | undefined> {
+  if (!name || name === '.') { return undefined; }
   try {
-    const remotes = await git(['remote'], cwd);
-    const names = remotes.stdout.split(/\r?\n/).map(v => v.trim()).filter(Boolean);
-    const urls = await Promise.all(names.map(async name => {
-      try {
-        return (await git(['remote', 'get-url', name], cwd)).stdout.trim();
-      } catch {
-        return '';
-      }
-    }));
-    return urls.filter(Boolean);
+    const args = ['remote', 'get-url'];
+    if (kind === 'push') { args.push('--push'); }
+    args.push(name);
+    return (await git(args, cwd)).stdout.trim() || undefined;
   } catch {
-    return [];
+    return undefined;
   }
+}
+
+async function getTargetRemote(
+  cwd: string,
+  kind: 'push' | 'pull'
+): Promise<{ name: string; url: string } | undefined> {
+  const names = await getRemoteNames(cwd);
+  if (names.length === 0) { return undefined; }
+
+  let branch: string | undefined;
+  try {
+    branch = (await git(['symbolic-ref', '--quiet', '--short', 'HEAD'], cwd)).stdout.trim();
+  } catch {
+    // Detached HEAD: use repository-level defaults.
+  }
+
+  const candidates: Array<string | undefined> = [];
+  if (branch && kind === 'push') {
+    candidates.push(await getConfig(cwd, `branch.${branch}.pushRemote`));
+  }
+  if (kind === 'push') {
+    candidates.push(await getConfig(cwd, 'remote.pushDefault'));
+  }
+  if (branch) {
+    candidates.push(await getConfig(cwd, `branch.${branch}.remote`));
+  }
+  candidates.push(names.includes('origin') ? 'origin' : undefined, names[0]);
+
+  for (const name of candidates) {
+    if (!name || !names.includes(name)) { continue; }
+    const url = await getRemoteUrl(cwd, name, kind);
+    if (url) { return { name, url }; }
+  }
+  return undefined;
 }
 
 async function unsetLocalConfig(cwd: string, key: string): Promise<void> {
@@ -135,6 +182,37 @@ async function unsetLocalConfig(cwd: string, key: string): Promise<void> {
     await git(['config', '--local', '--unset-all', key], cwd);
   } catch {
     // Git exits non-zero when the key was not set.
+  }
+}
+
+interface ConfigChange {
+  key: string;
+  value: string;
+}
+
+async function applyLocalConfigAtomically(cwd: string, changes: ConfigChange[]): Promise<void> {
+  const previous = await Promise.all(changes.map(async change => ({
+    key: change.key,
+    value: await getLocalConfig(cwd, change.key)
+  })));
+
+  try {
+    for (const change of changes) {
+      await git(['config', '--local', change.key, change.value], cwd);
+    }
+  } catch (error) {
+    for (const old of previous.reverse()) {
+      try {
+        if (old.value === undefined) {
+          await unsetLocalConfig(cwd, old.key);
+        } else {
+          await git(['config', '--local', old.key, old.value], cwd);
+        }
+      } catch {
+        // Preserve the original failure; rollback is best-effort.
+      }
+    }
+    throw error;
   }
 }
 
@@ -227,42 +305,34 @@ async function pickAccount(placeHolder: string, cwd?: string): Promise<Account |
 }
 
 /** Writes commit identity and transport-specific authentication into local config. */
-async function applyToRepo(cwd: string, acc: Account): Promise<void> {
-  await git(['config', '--local', 'user.name', acc.name], cwd);
-  await git(['config', '--local', 'user.email', acc.email], cwd);
+async function applyToRepo(cwd: string, acc: Account, remoteUrl?: string): Promise<void> {
+  const transport = remoteTransport(remoteUrl);
+  const changes: ConfigChange[] = [
+    { key: 'user.name', value: acc.name },
+    { key: 'user.email', value: acc.email }
+  ];
 
-  const remoteUrls = await getRemoteUrls(cwd);
-  const httpsContexts = [...new Set(remoteUrls.map(httpsCredentialContext).filter(
-    (v): v is string => Boolean(v)
-  ))];
-  const hasSshRemote = remoteUrls.some(url =>
-    /^ssh:\/\//i.test(url) || /^[^/@\s]+@[^/:\s]+:/i.test(url)
-  );
-
-  if (httpsContexts.length > 0) {
+  // Resolve and validate authentication before writing anything, so cancelling
+  // setup cannot leave a partially switched repository identity.
+  if (transport === 'https') {
     const httpsUsername = await ensureHttpsUsername(acc);
     if (!httpsUsername) {
-      throw new Error(
-        `HTTPS setup for "${acc.label || acc.email}" was cancelled.`
-      );
+      throw new Error(`HTTPS setup for "${acc.label || acc.email}" was cancelled.`);
     }
-    for (const context of httpsContexts) {
-      await git(
-        ['config', '--local', `credential.${context}.username`, httpsUsername],
-        cwd
-      );
+    const context = httpsCredentialContext(remoteUrl!);
+    if (context) {
+      changes.push({ key: `credential.${context}.username`, value: httpsUsername });
     }
-  }
-
-  if (hasSshRemote || remoteUrls.length === 0) {
-    if (acc.sshKey) {
-      await git(['config', '--local', 'core.sshCommand', sshCommandFor(acc)], cwd);
-    } else if (hasSshRemote) {
+  } else if (transport === 'ssh') {
+    if (!acc.sshKey) {
       throw new Error(`Account "${acc.label}" does not have an SSH key configured.`);
     }
-  } else {
-    await unsetLocalConfig(cwd, 'core.sshCommand');
+    changes.push({ key: 'core.sshCommand', value: sshCommandFor(acc) });
+  } else if (!remoteUrl && acc.sshKey) {
+    changes.push({ key: 'core.sshCommand', value: sshCommandFor(acc) });
   }
+
+  await applyLocalConfigAtomically(cwd, changes);
 }
 
 function refreshBuiltInGit() {
@@ -322,9 +392,14 @@ async function promptIfUnset(): Promise<void> {
     if (choice === 'Select Account') {
       const acc = await pickAccount(`Account for ${folder.name}`, cwd);
       if (acc) {
-        await applyToRepo(cwd, acc);
-        refreshBuiltInGit();
-        await updateStatusBar();
+        try {
+          const target = await getTargetRemote(cwd, 'push');
+          await applyToRepo(cwd, acc, target?.url);
+          refreshBuiltInGit();
+          await updateStatusBar();
+        } catch (e: any) {
+          vscode.window.showErrorMessage(`Could not apply account: ${e.message}`);
+        }
       }
     }
     // show prompts sequentially so every newly opened repository is covered
@@ -339,7 +414,8 @@ async function cmdSwitch() {
   const acc = await pickAccount('Select Git account for this repo', cwd);
   if (!acc) { return; }
   try {
-    await applyToRepo(cwd, acc);
+    const target = await getTargetRemote(cwd, 'push');
+    await applyToRepo(cwd, acc, target?.url);
     refreshBuiltInGit();
     await updateStatusBar();
     vscode.window.showInformationMessage(`This repo now uses "${acc.label}" (${acc.email}).`);
@@ -425,8 +501,8 @@ async function cmdClone() {
   if (!acc) { return; }
 
   const url = await vscode.window.showInputBox({
-    prompt: 'Repository URL (SSH recommended)',
-    placeHolder: 'git@github.com:company/repo.git',
+    prompt: 'Repository URL (HTTPS or SSH)',
+    placeHolder: 'https://github.com/company/repo.git',
     ignoreFocusOut: true,
     validateInput: v => (v.trim() ? undefined : 'Enter a repository URL')
   });
@@ -438,7 +514,7 @@ async function cmdClone() {
     const httpsUsername = await ensureHttpsUsername(acc);
     if (!httpsUsername) { return; }
   }
-  if (!credentialContext && !acc.sshKey) {
+  if (remoteTransport(cleanUrl) === 'ssh' && !acc.sshKey) {
     vscode.window.showErrorMessage(
       `Account "${acc.label}" does not have an SSH key configured.`
     );
@@ -458,23 +534,28 @@ async function cmdClone() {
     cleanUrl.replace(/[\\/]+$/, '').replace(/\.git$/i, '').split(/[/:]/).pop() || 'repo';
   const parent = dest[0].fsPath;
   const target = path.join(parent, repoName);
-  const sshCmd = acc.sshKey ? sshCommandFor(acc) : undefined;
+  const transport = remoteTransport(cleanUrl);
+  const sshCmd = transport === 'ssh' ? sshCommandFor(acc) : undefined;
 
   try {
     await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: `Cloning ${repoName} as ${acc.label}…` },
       async () => {
-        const cloneConfig = credentialContext
-          ? `credential.${credentialContext}.username=${acc.httpsUsername}`
-          : `core.sshCommand=${sshCmd}`;
+        const cloneArgs = ['clone'];
+        if (credentialContext) {
+          cloneArgs.push('-c', `credential.${credentialContext}.username=${acc.httpsUsername}`);
+        } else if (sshCmd) {
+          cloneArgs.push('-c', `core.sshCommand=${sshCmd}`);
+        }
+        cloneArgs.push(cleanUrl, repoName);
         await git(
-          ['clone', '-c', cloneConfig, cleanUrl, repoName],
+          cloneArgs,
           parent,
           sshCmd
             ? { GIT_SSH_COMMAND: sshCmd, GIT_TERMINAL_PROMPT: '0' }
             : { GIT_TERMINAL_PROMPT: '0' }
         );
-        await applyToRepo(target, acc);
+        await applyToRepo(target, acc, cleanUrl);
       }
     );
   } catch (e: any) {
@@ -504,15 +585,12 @@ async function runWithAccount(kind: 'push' | 'pull') {
   if (!acc) { return; }
 
   try {
-    await applyToRepo(cwd, acc);
+    const target = await getTargetRemote(cwd, kind);
+    await applyToRepo(cwd, acc, target?.url);
     await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: `git ${kind} as ${acc.label}…` },
       async () => {
-        const remoteUrls = await getRemoteUrls(cwd);
-        const usesSsh = remoteUrls.some(url =>
-          /^ssh:\/\//i.test(url) || /^[^/@\s]+@[^/:\s]+:/i.test(url)
-        );
-        const env = usesSsh
+        const env = remoteTransport(target?.url) === 'ssh'
           ? { GIT_SSH_COMMAND: sshCommandFor(acc), GIT_TERMINAL_PROMPT: '0' }
           : { GIT_TERMINAL_PROMPT: '0' };
         try {
@@ -555,12 +633,12 @@ async function cmdTestConnection() {
     '-o', 'StrictHostKeyChecking=accept-new',
     '-T', `git@${host}`
   ];
-  out.appendLine(`> ssh ${args.join(' ')}`);
+  out.appendLine(`> ssh ${formatCommandArgs(args)}`);
 
   execFile('ssh', args, { windowsHide: true }, (_err, stdout, stderr) => {
     // GitHub exits with code 1 even on success, so read the text instead of the exit code.
     const text = `${stdout}\n${stderr}`.trim();
-    out.appendLine(text);
+    out.appendLine(redactSensitiveText(text));
     if (/successfully authenticated|authenticated via ssh key|welcome to gitlab|logged in as/i.test(text)) {
       const firstLine = text.split(/\r?\n/).find(l => l.trim()) ?? 'Authenticated.';
       vscode.window.showInformationMessage(`${acc.label}: ${firstLine}`);

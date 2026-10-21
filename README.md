@@ -104,3 +104,9 @@ Or from a terminal: `code --install-extension git-account-switcher-0.1.0.vsix`.
   Run Test SSH Connection.
 - **Still committing with the wrong email:** check the status bar; run `git config --local user.email` in the terminal.
 - **Output log:** View, Output, choose **Git Account Switcher** to see every Git command that was run.
+
+## Support and security
+
+Use [GitHub Issues](https://github.com/panchalvimaldev/git-account-switcher/issues) for bugs and feature requests. See [SUPPORT.md](SUPPORT.md) for the information to include.
+
+Do not post credentials or private keys in an issue. Use GitHub's private security-advisory feature for credential-handling vulnerabilities; see [SECURITY.md](SECURITY.md).
