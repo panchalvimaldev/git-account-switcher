@@ -57,6 +57,33 @@ function getAccounts(): Account[] {
   );
 }
 
+async function ensureHttpsUsername(acc: Account): Promise<string | undefined> {
+  const existing = acc.httpsUsername?.trim();
+  if (existing) { return existing; }
+
+  const username = await vscode.window.showInputBox({
+    prompt: `HTTPS username for "${acc.label || acc.email}"`,
+    placeHolder: 'GitHub, GitLab, or Bitbucket username',
+    ignoreFocusOut: true,
+    validateInput: value => value.trim() ? undefined : 'Enter your hosting-service username'
+  });
+  if (!username?.trim()) { return undefined; }
+
+  const value = username.trim();
+  const cfg = vscode.workspace.getConfiguration('gitAccounts');
+  const list = cfg.inspect<Account[]>('list')?.globalValue ?? [];
+  const updated = list.map(item =>
+    item?.label === acc.label &&
+    typeof item.email === 'string' &&
+    item.email.toLowerCase() === acc.email.toLowerCase()
+      ? { ...item, httpsUsername: value }
+      : item
+  );
+  await cfg.update('list', updated, vscode.ConfigurationTarget.Global);
+  acc.httpsUsername = value;
+  return value;
+}
+
 /** Expands ~, resolves the path and uses forward slashes (works with Git for Windows). */
 function normalizeKeyPath(p: string): string {
   let k = p.trim();
@@ -213,14 +240,15 @@ async function applyToRepo(cwd: string, acc: Account): Promise<void> {
   );
 
   if (httpsContexts.length > 0) {
-    if (!acc.httpsUsername) {
+    const httpsUsername = await ensureHttpsUsername(acc);
+    if (!httpsUsername) {
       throw new Error(
-        `Account "${acc.label}" does not have an HTTPS username configured.`
+        `HTTPS setup for "${acc.label || acc.email}" was cancelled.`
       );
     }
     for (const context of httpsContexts) {
       await git(
-        ['config', '--local', `credential.${context}.username`, acc.httpsUsername],
+        ['config', '--local', `credential.${context}.username`, httpsUsername],
         cwd
       );
     }
@@ -406,11 +434,9 @@ async function cmdClone() {
   const cleanUrl = url.trim();
 
   const credentialContext = httpsCredentialContext(cleanUrl);
-  if (credentialContext && !acc.httpsUsername) {
-    vscode.window.showErrorMessage(
-      `Account "${acc.label}" does not have an HTTPS username configured.`
-    );
-    return;
+  if (credentialContext) {
+    const httpsUsername = await ensureHttpsUsername(acc);
+    if (!httpsUsername) { return; }
   }
   if (!credentialContext && !acc.sshKey) {
     vscode.window.showErrorMessage(

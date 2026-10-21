@@ -74,6 +74,7 @@ The status bar shows the active account for the current repo. It turns yellow wh
 - The built-in Push/Pull buttons cannot show a popup (extensions cannot intercept them). Choose the account
   once per repo; use **Push with Account** / **Pull with Account** if you want to be asked every time.
 - The first HTTPS operation may open Git Credential Manager's sign-in flow for the selected username.
+- Existing SSH-only accounts prompt once for an HTTPS username when first used with an HTTPS remote.
 - Keys protected by a passphrase need `ssh-agent` running with the key added (`ssh-add <key>`),
   otherwise push/pull fails because VS Code cannot type the passphrase. Keys without a passphrase work directly.
 - Use a separate repo-level identity: this extension edits `.git/config` of each repo, not your global config.

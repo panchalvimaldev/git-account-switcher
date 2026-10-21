@@ -2,7 +2,7 @@
   "name": "git-account-switcher",
   "displayName": "Git Account Switcher",
   "description": "Pick which Git account to use for clone, pull and push over SSH or HTTPS, right from VS Code.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "local",
   "license": "MIT",
   "engines": { "vscode": "^1.85.0" },
