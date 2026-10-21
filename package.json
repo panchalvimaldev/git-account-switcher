@@ -1,0 +1,71 @@
+{
+  "name": "git-account-switcher",
+  "displayName": "Git Account Switcher",
+  "description": "Pick which Git account to use for clone, pull and push over SSH or HTTPS, right from VS Code.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["SCM Providers", "Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "gitAccounts.switch", "title": "Git Accounts: Switch Account for This Repo" },
+      { "command": "gitAccounts.clone", "title": "Git Accounts: Clone with Account" },
+      { "command": "gitAccounts.pushWith", "title": "Git Accounts: Push with Account" },
+      { "command": "gitAccounts.pullWith", "title": "Git Accounts: Pull with Account" },
+      { "command": "gitAccounts.addAccount", "title": "Git Accounts: Add Account" },
+      { "command": "gitAccounts.testConnection", "title": "Git Accounts: Test SSH Connection" },
+      { "command": "gitAccounts.openSettings", "title": "Git Accounts: Open Settings" }
+    ],
+    "configuration": {
+      "title": "Git Account Switcher",
+      "properties": {
+        "gitAccounts.list": {
+          "type": "array",
+          "scope": "machine",
+          "default": [],
+          "description": "Your Git accounts. Configure an SSH key, an HTTPS username, or both. HTTPS secrets are managed by Git Credential Manager.",
+          "items": {
+            "type": "object",
+            "required": ["label", "name", "email"],
+            "anyOf": [
+              { "required": ["sshKey"] },
+              { "required": ["httpsUsername"] }
+            ],
+            "properties": {
+              "label": { "type": "string", "description": "Short name shown in the popup, e.g. Work" },
+              "name": { "type": "string", "description": "Value for git user.name" },
+              "email": { "type": "string", "description": "Value for git user.email" },
+              "sshKey": { "type": "string", "description": "Optional path to the private SSH key, e.g. C:/Users/you/.ssh/id_ed25519_work" },
+              "httpsUsername": { "type": "string", "description": "Optional hosting-service username used by Git Credential Manager for HTTPS remotes" }
+            }
+          }
+        },
+        "gitAccounts.promptOnOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask which account to use when a repo without a local user.email is opened."
+        },
+        "gitAccounts.testHost": {
+          "type": "string",
+          "default": "github.com",
+          "description": "Host used by 'Test SSH Connection' (e.g. github.com, gitlab.com, bitbucket.org)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.24.0",
+    "typescript": "^5.3.3"
+  }
+}
